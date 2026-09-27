@@ -1,0 +1,19 @@
+{
+  "name": "ses-mail-forwarder",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SES inbound email forwarding Lambda",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "check": "node --check index.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/client-ses": "^3.0.0",
+    "mailparser": "^3.7.0",
+    "nodemailer": "^6.9.0"
+  }
+}

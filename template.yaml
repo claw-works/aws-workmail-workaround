@@ -1,0 +1,176 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  SES 邮件接收转发系统:S3 归档、SES ReceiptRule 与 Lambda 全量转发。
+  Region 固定 us-west-2。
+
+Parameters:
+  DefaultMailbox:
+    Type: String
+    Default: you@example.com
+    Description: 全量归口默认邮箱(DEFAULT_MAILBOX),所有收到的邮件转发到这里;部署时用 --parameter-overrides 传真实地址
+
+  FromAddress:
+    Type: String
+    Default: noreply@brclient.chat
+    Description: 转发邮件使用的发件地址(FROM_ADDRESS,brclient.chat 已验证地址)
+
+  ArchiveRetentionDays:
+    Type: Number
+    Default: 90
+    Description: S3 中原始邮件的归档保留天数(ARCHIVE_RETENTION_DAYS),超期自动过期删除
+    MinValue: 1
+
+Resources:
+  ArchiveBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireArchivedMail
+            Status: Enabled
+            Prefix: inbound/
+            ExpirationInDays: !Ref ArchiveRetentionDays
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ArchiveBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArchiveBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSESPut
+            Effect: Allow
+            Principal:
+              Service: ses.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${ArchiveBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  ForwarderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ForwarderRuntime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadInboundMail
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${ArchiveBucket.Arn}/inbound/*'
+              - Sid: SendFromForwarderAddress
+                Effect: Allow
+                Action: ses:SendRawEmail
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    ses:FromAddress: noreply@brclient.chat
+              - Sid: CreateLogGroup
+                Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*'
+              - Sid: WriteFunctionLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-forwarder:*'
+
+  ForwarderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-forwarder'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt ForwarderRole.Arn
+      Code: src/forwarder/
+      Environment:
+        Variables:
+          DEFAULT_MAILBOX: !Ref DefaultMailbox
+          FROM_ADDRESS: !Ref FromAddress
+          ARCHIVE_RETENTION_DAYS: !Ref ArchiveRetentionDays
+          S3_BUCKET: !Ref ArchiveBucket
+          S3_PREFIX: inbound/
+
+  ForwarderInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ForwarderFunction
+      Principal: ses.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  ReceiptRuleSet:
+    Type: AWS::SES::ReceiptRuleSet
+
+  InboundReceiptRule:
+    Type: AWS::SES::ReceiptRule
+    DependsOn:
+      - ArchiveBucketPolicy
+      - ForwarderInvokePermission
+    Properties:
+      RuleSetName: !Ref ReceiptRuleSet
+      Rule:
+        Name: archive-and-forward
+        Enabled: true
+        ScanEnabled: true
+        Recipients:
+          - brclient.chat
+        Actions:
+          - S3Action:
+              BucketName: !Ref ArchiveBucket
+              ObjectKeyPrefix: inbound/
+          - LambdaAction:
+              FunctionArn: !GetAtt ForwarderFunction.Arn
+              InvocationType: Event
+
+Outputs:
+  ArchiveBucketName:
+    Description: S3 归档桶名称
+    Value: !Ref ArchiveBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-ArchiveBucketName'
+
+  ArchiveBucketArn:
+    Description: S3 归档桶 ARN
+    Value: !GetAtt ArchiveBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ArchiveBucketArn'
+
+  DefaultMailboxOut:
+    Description: 全量归口默认邮箱
+    Value: !Ref DefaultMailbox
+
+  FromAddressOut:
+    Description: 转发发件地址
+    Value: !Ref FromAddress
+
+  ArchiveRetentionDaysOut:
+    Description: S3 归档保留天数
+    Value: !Ref ArchiveRetentionDays
+
+  ReceiptRuleSetName:
+    Description: SES receipt rule set 名称(供激活脚本使用)
+    Value: !Ref ReceiptRuleSet
+
+  LambdaFunctionName:
+    Description: 邮件转发 Lambda 函数名称
+    Value: !Ref ForwarderFunction

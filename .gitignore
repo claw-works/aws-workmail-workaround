@@ -1,0 +1,15 @@
+# 依赖
+node_modules/
+
+# CFN 打包产物(含账号 ID 与 S3 引用,不入库)
+packaged.yaml
+
+# 构建/临时
+*.log
+.DS_Store
+build/
+dist/
+
+# 本地环境
+.env
+*.local
